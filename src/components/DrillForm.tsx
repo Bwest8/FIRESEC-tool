@@ -1,4 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
+import { Button } from './ui/button';
+import { Input } from './ui/input';
+import { Select } from './ui/select';
+import { Label } from './ui/label';
+import { Table, THead, TBody, TR, TH, TD } from './ui/table';
 import {
   Download,
   Calendar,
@@ -13,7 +18,15 @@ import {
 } from 'lucide-react';
 import { saveAs } from 'file-saver';
 import Papa from 'papaparse';
-import districtData, { DistrictLocation } from '../data/DistrictLocations';
+
+// Local type for district locations (to support dynamic import + JSON fetch)
+interface DistrictLocation {
+  AUN: string;
+  DISTRICT_NAME: string;
+  SCHOOL_NUMBER: string;
+  LOCATION_NAME: string;
+  ORG_TYPE: string;
+}
 
 const months = [
   'FIRSTDAY',
@@ -71,6 +84,9 @@ interface DrillEntry {
   reason?: string;
   comment?: string;
   errors?: string[];
+  dateErrors?: string[];
+  reasonErrors?: string[];
+  commentErrors?: string[];
   warnings?: string[];
 }
 
@@ -85,6 +101,9 @@ export default function DrillForm() {
   const [selectedAUN, setSelectedAUN] = useState('');
   const [formData, setFormData] = useState<FormData>({});
   const [isValid, setIsValid] = useState(false);
+  // District data is lazy-loaded to keep initial bundle light
+  const [districtData, setDistrictData] = useState<DistrictLocation[] | null>(null);
+  const [districtsError, setDistrictsError] = useState<string | null>(null);
 
   const currentYear = new Date().getFullYear();
   const schoolYears = Array.from({ length: 5 }, (_, i) => {
@@ -96,22 +115,84 @@ export default function DrillForm() {
     };
   });
 
-  const districts = Array.from(
-    new Map(districtData.map((d) => [d.AUN, d.DISTRICT_NAME]))
-  );
+  // Load districts data after user selects a year (defers heavy data until needed)
+  useEffect(() => {
+    let cancelled = false;
+    async function loadDistricts() {
+      if (!selectedYear || districtData) return;
+      setDistrictsError(null);
+      try {
+        const res = await fetch('/districts.json', { cache: 'no-store' });
+        if (res.ok) {
+          const json = (await res.json()) as DistrictLocation[];
+          if (Array.isArray(json) && json.length > 0) {
+            if (!cancelled) setDistrictData(json);
+            return;
+          }
+          // If file is empty, intentionally fall through to fallback import
+          throw new Error('Empty districts.json');
+        }
+        throw new Error(`Failed to fetch districts.json: ${res.status}`);
+      } catch (err) {
+        // Fallback to dynamic import of TypeScript data (not bundled upfront)
+        try {
+          const mod: any = await import('../data/DistrictLocations');
+          const data: DistrictLocation[] = mod.default || mod.districtData || [];
+          if (!cancelled) setDistrictData(data);
+        } catch (e) {
+          if (!cancelled)
+            setDistrictsError('Unable to load district data. Please try again.');
+        }
+      }
+    }
+    loadDistricts();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedYear, districtData]);
 
-  const schools = districtData.filter((d) => d.AUN === selectedAUN);
+  const districts = districtData
+    ? Array.from(new Map(districtData.map((d) => [d.AUN, d.DISTRICT_NAME])))
+    : [];
+
+  const schools = (districtData || []).filter((d) => d.AUN === selectedAUN);
+
+  // Helper: timezone-safe day difference for YYYY-MM-DD inputs
+  const diffInCalendarDays = (dateStr: string, baseStr: string) => {
+    if (!dateStr || !baseStr) return 0;
+    const [y1, m1, d1] = dateStr.split('-').map((n) => parseInt(n, 10));
+    const [y2, m2, d2] = baseStr.split('-').map((n) => parseInt(n, 10));
+    // Use UTC to avoid DST/timezone shifts
+    const t1 = Date.UTC(y1, (m1 || 1) - 1, d1 || 1);
+    const t2 = Date.UTC(y2, (m2 || 1) - 1, d2 || 1);
+    return Math.floor((t1 - t2) / (1000 * 60 * 60 * 24));
+  };
 
   const addDrillRow = (schoolNum: string, month: string) => {
     setFormData((prev) => {
       const monthRows = prev[schoolNum]?.[month] || [];
-      const type = monthRows[0]?.type || 'FIRE';
-      const maxAllowed = measureSetLimits[month]?.[type] || 1;
-
-      if (monthRows.length >= maxAllowed) {
-        alert(
-          `You cannot add more than ${maxAllowed} ${type} drill(s) for ${monthLabels[month]}`
-        );
+      const limits = measureSetLimits[month] || { FIRE: 0, SECURITY: 0 };
+      const counts = monthRows.reduce(
+        (acc, r) => {
+          const t = (r?.type === 'SECURITY' ? 'SECURITY' : 'FIRE') as 'FIRE' | 'SECURITY';
+          acc[t] += 1;
+          return acc;
+        },
+        { FIRE: 0, SECURITY: 0 }
+      );
+      const lastType = (monthRows[monthRows.length - 1]?.type || 'FIRE') as
+        | 'FIRE'
+        | 'SECURITY';
+      let addType: 'FIRE' | 'SECURITY' = lastType;
+      if (counts[addType] >= (limits as any)[addType]) {
+        const other = addType === 'FIRE' ? 'SECURITY' : 'FIRE';
+        if (counts[other] < (limits as any)[other]) addType = other;
+      }
+      // If neither FIRE nor SECURITY is available, do nothing
+      if (
+        counts.FIRE >= (limits as any).FIRE &&
+        counts.SECURITY >= (limits as any).SECURITY
+      ) {
         return prev;
       }
 
@@ -122,12 +203,15 @@ export default function DrillForm() {
           [month]: [
             ...monthRows,
             {
-              type: type,
-              indicator: 'N',
+              type: month === 'FIRSTDAY' ? 'FIRE' : addType,
+              indicator: month === 'FIRSTDAY' ? 'Y' : 'N',
               date: '',
               reason: '',
               comment: '',
               errors: [],
+              dateErrors: [],
+              reasonErrors: [],
+              commentErrors: [],
               warnings: [],
             },
           ],
@@ -159,6 +243,37 @@ export default function DrillForm() {
     setFormData((prev) => {
       const monthRows = prev[schoolNum]?.[month] || [];
       const updatedRows = [...monthRows];
+
+      // Enforce per-type limits on type change
+      if (field === 'type') {
+        const newType = (value === 'SECURITY' ? 'SECURITY' : 'FIRE') as
+          | 'FIRE'
+          | 'SECURITY';
+        const limits = measureSetLimits[month] || { FIRE: 0, SECURITY: 0 };
+        const counts = monthRows.reduce(
+          (acc, r, i) => {
+            if (i === idx) return acc; // exclude current row when evaluating
+            const t = (r?.type === 'SECURITY' ? 'SECURITY' : 'FIRE') as 'FIRE' | 'SECURITY';
+            acc[t] += 1;
+            return acc;
+          },
+          { FIRE: 0, SECURITY: 0 }
+        );
+        if (counts[newType] >= (limits as any)[newType]) {
+          // Block change and add a warning message inline
+          const row = { ...updatedRows[idx] };
+          const w = new Set([...(row.warnings || []), `Monthly limit reached for ${newType} drills`]);
+          updatedRows[idx] = { ...row, warnings: Array.from(w) } as DrillEntry;
+          return {
+            ...prev,
+            [schoolNum]: {
+              ...prev[schoolNum],
+              [month]: updatedRows,
+            },
+          };
+        }
+      }
+
       updatedRows[idx] = { ...updatedRows[idx], [field]: value };
       const updated = {
         ...prev,
@@ -178,34 +293,37 @@ export default function DrillForm() {
     idx: number
   ) => {
     const row = data[schoolNum]?.[month]?.[idx] || {};
-    const errors: string[] = [];
+    const dateErrors: string[] = [];
+    const reasonErrors: string[] = [];
+    const commentErrors: string[] = [];
     const warnings: string[] = [];
     const isFirstDay = month === 'FIRSTDAY';
-    const indicator = row.indicator || (isFirstDay ? 'Y' : 'N');
+    // FIRSTDAY: force type FIRE and indicator Y
+    const indicator = isFirstDay ? 'Y' : row.indicator || 'N';
+    if (isFirstDay && row.type !== 'FIRE') {
+      row.type = 'FIRE';
+    }
     const date = row.date || '';
-    const reason = row.reason || '';
+    const reason = isFirstDay ? '' : row.reason || '';
     const comment = row.comment || '';
 
     if (isFirstDay) {
-      if (indicator !== 'Y') errors.push('First Day must have INDICATOR = Y');
-      if (!date) errors.push('First Day must have a DATE');
+      if (indicator !== 'Y') dateErrors.push('First Day must have INDICATOR = Y');
+      if (!date) dateErrors.push('First Day must have a DATE');
     } else {
       if (indicator === 'Y' && !date)
-        errors.push('Date required when drill conducted');
+        dateErrors.push('Date required when drill conducted');
       if (indicator === 'N') {
-        if (!reason) errors.push('Reason required when no drill conducted');
+        if (!reason) reasonErrors.push('Reason required when no drill conducted');
         if (reason === '03' && !comment)
-          errors.push("Comment required for 'Other' reason");
+          commentErrors.push("Comment required for 'Other' reason");
       }
     }
 
     if (row.type === 'SECURITY' && indicator === 'Y' && date) {
       const firstDayDate = data[schoolNum]?.['FIRSTDAY']?.[0]?.date;
       if (firstDayDate) {
-        const diffDays = Math.floor(
-          (new Date(date).getTime() - new Date(firstDayDate).getTime()) /
-            (1000 * 60 * 60 * 24)
-        );
+        const diffDays = diffInCalendarDays(date, firstDayDate);
         if (diffDays > 90) {
           warnings.push('Security drill is more than 90 days after FIRSTDAY');
         }
@@ -215,12 +333,9 @@ export default function DrillForm() {
         const drills = data[schoolNum]?.[m] || [];
         return drills.some((r) => {
           if (r.type === 'SECURITY' && r.indicator === 'Y' && r.date) {
-            const diff = Math.floor(
-              (new Date(r.date).getTime() -
-                new Date(
-                  data[schoolNum]?.['FIRSTDAY']?.[0]?.date || ''
-                ).getTime()) /
-                (1000 * 60 * 60 * 24)
+            const diff = diffInCalendarDays(
+              r.date,
+              data[schoolNum]?.['FIRSTDAY']?.[0]?.date || ''
             );
             return diff > 90;
           }
@@ -232,7 +347,15 @@ export default function DrillForm() {
       }
     }
 
-    data[schoolNum][month][idx] = { ...row, errors, warnings };
+    data[schoolNum][month][idx] = {
+      ...row,
+      dateErrors,
+      reasonErrors,
+      commentErrors,
+      warnings,
+      // Keep legacy errors for validation check
+      errors: [...dateErrors, ...reasonErrors, ...commentErrors]
+    };
     return { ...data };
   };
 
@@ -280,6 +403,7 @@ export default function DrillForm() {
             NC10: '',
             DATE: entry.date || '',
             NC11: '',
+            REASON: entry.reason || '',
             COMMENT: entry.comment || '',
           });
         });
@@ -314,16 +438,14 @@ export default function DrillForm() {
       <main className="max-w-7xl mx-auto px-6 py-8">
         {/* School Year Selection */}
         <section className="bg-white border border-gray-300 rounded-lg shadow-sm mb-8 p-6">
-          <label className="block text-lg font-bold mb-2">
-            Select School Year
-          </label>
-          <select
+          <Label className="text-lg font-bold mb-2">Select School Year</Label>
+          <Select
             value={selectedYear}
             onChange={(e) => {
               setSelectedYear(e.target.value);
               setSelectedAUN('');
             }}
-            className="w-full border border-gray-400 rounded px-4 py-2"
+            className="w-full"
           >
             <option value="">- Select a school year -</option>
             {schoolYears.map((year) => (
@@ -331,19 +453,18 @@ export default function DrillForm() {
                 {year.label}
               </option>
             ))}
-          </select>
+          </Select>
         </section>
 
         {/* District Selection */}
         {selectedYear && (
           <section className="bg-white border border-gray-300 rounded-lg shadow-sm mb-8 p-6">
-            <label className="block text-lg font-bold mb-2">
-              Select Your District
-            </label>
-            <select
+            <Label className="text-lg font-bold mb-2">Select Your District</Label>
+            <Select
               value={selectedAUN}
               onChange={(e) => setSelectedAUN(e.target.value)}
-              className="w-full border border-gray-400 rounded px-4 py-2"
+              className="w-full"
+              disabled={!districtData}
             >
               <option value="">- Select a district -</option>
               {districts.map(([aun, name]) => (
@@ -351,7 +472,13 @@ export default function DrillForm() {
                   {name}
                 </option>
               ))}
-            </select>
+            </Select>
+            {!districtData && !districtsError && (
+              <p className="text-sm text-gray-600 mt-2">Loading district list…</p>
+            )}
+            {districtsError && (
+              <p className="text-sm text-red-600 mt-2">{districtsError}</p>
+            )}
           </section>
         )}
 
@@ -371,72 +498,79 @@ export default function DrillForm() {
                   </span>
                 </header>
                 <div className="overflow-x-auto">
-                  <table className="w-full border-collapse">
-                    <thead className="bg-gray-100 sticky top-0">
-                      <tr>
-                        <th className="border px-3 py-2 text-left">Month</th>
-                        <th className="border px-3 py-2">Drill Type</th>
-                        <th className="border px-3 py-2">Conducted</th>
-                        <th className="border px-3 py-2">Date</th>
-                        <th className="border px-3 py-2">Reason</th>
-                        <th className="border px-3 py-2">Comment</th>
-                        <th className="border px-3 py-2">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
+                  <Table>
+                    <THead>
+                      <TR>
+                        <TH>Month</TH>
+                        <TH>Drill Type</TH>
+                        <TH>Conducted</TH>
+                        <TH>Date</TH>
+                        <TH>Reason</TH>
+                        <TH>Comment</TH>
+                        <TH className="text-center w-28">Actions</TH>
+                      </TR>
+                    </THead>
+                    <TBody>
                       {months.map((month) => {
-                        const drills = formData[school.SCHOOL_NUMBER]?.[
-                          month
-                        ] || [
-                          {
-                            type: 'FIRE',
-                            indicator: month === 'FIRSTDAY' ? 'Y' : 'N',
-                            date: '',
-                            reason: '',
-                            comment: '',
-                            errors: [],
-                            warnings: [],
+                        const drills = formData[school.SCHOOL_NUMBER]?.[month] || [
+                            {
+                              type: 'FIRE',
+                              indicator: month === 'FIRSTDAY' ? 'Y' : 'N',
+                              date: '',
+                              reason: '',
+                              comment: '',
+                              errors: [],
+                              dateErrors: [],
+                              reasonErrors: [],
+                              commentErrors: [],
+                              warnings: [],
+                            },
+                          ];
+                        const limits = measureSetLimits[month] || { FIRE: 0, SECURITY: 0 };
+                        const counts = drills.reduce(
+                          (acc, r) => {
+                            const t = (r?.type === 'SECURITY' ? 'SECURITY' : 'FIRE') as 'FIRE' | 'SECURITY';
+                            acc[t] += 1;
+                            return acc;
                           },
-                        ];
+                          { FIRE: 0, SECURITY: 0 }
+                        );
+                        const canAddAny = counts.FIRE < (limits as any).FIRE || counts.SECURITY < (limits as any).SECURITY;
                         return drills.map((rowData, idx) => {
                           const indicator =
                             rowData.indicator ||
                             (month === 'FIRSTDAY' ? 'Y' : 'N');
-                          const maxAllowed =
-                            measureSetLimits[month]?.[rowData.type || 'FIRE'] ||
-                            1;
                           return (
-                            <tr
+                            <TR
                               key={`${school.SCHOOL_NUMBER}-${month}-${idx}`}
                               className={
                                 month === 'FIRSTDAY' ? 'bg-blue-50' : ''
                               }
                             >
                               {idx === 0 && (
-                                <td
+                                <TD
                                   rowSpan={drills.length}
-                                  className="border px-3 py-2"
+                                  className="align-top"
                                 >
                                   <div className="flex items-center gap-2">
                                     <Calendar
-                                      className={`w-5 h-5 flex-shrink-0 ${
-                                        month === 'FIRSTDAY'
-                                          ? 'text-blue-600'
-                                          : 'text-gray-500'
-                                      }`}
+                                      className={`w-5 h-5 flex-shrink-0 ${month === 'FIRSTDAY'
+                                        ? 'text-blue-600'
+                                        : 'text-gray-500'
+                                        }`}
                                     />
                                     <span>{monthLabels[month]}</span>
                                   </div>
-                                </td>
+                                </TD>
                               )}
-                              <td className="border px-3 py-2">
+                              <TD>
                                 <div className="flex items-center gap-2">
                                   {rowData.type === 'SECURITY' ? (
                                     <Shield className="w-5 h-5 flex-shrink-0 text-blue-600" />
                                   ) : (
                                     <Flame className="w-5 h-5 flex-shrink-0 text-orange-500" />
                                   )}
-                                  <select
+                                  <Select
                                     value={rowData.type || 'FIRE'}
                                     onChange={(e) =>
                                       handleChange(
@@ -447,23 +581,24 @@ export default function DrillForm() {
                                         e.target.value
                                       )
                                     }
-                                    className="w-full border border-gray-400 rounded px-2 py-1"
+                                    className="w-full"
+            disabled={month === 'FIRSTDAY'}
                                   >
                                     <option value="FIRE">Fire Drill</option>
                                     <option value="SECURITY">
                                       Security Drill
                                     </option>
-                                  </select>
+                                  </Select>
                                 </div>
-                              </td>
-                              <td className="border px-3 py-2">
+                              </TD>
+                              <TD>
                                 <div className="flex items-center gap-2">
                                   {indicator === 'Y' ? (
                                     <CheckCircle className="w-5 h-5 flex-shrink-0 text-green-600" />
                                   ) : (
                                     <XCircle className="w-5 h-5 flex-shrink-0 text-red-600" />
                                   )}
-                                  <select
+                                  <Select
                                     value={indicator}
                                     onChange={(e) =>
                                       handleChange(
@@ -474,16 +609,17 @@ export default function DrillForm() {
                                         e.target.value
                                       )
                                     }
-                                    className="w-full border border-gray-400 rounded px-2 py-1"
+                                    className="w-full"
+            disabled={month === 'FIRSTDAY'}
                                   >
                                     <option value="Y">Yes</option>
                                     <option value="N">No</option>
-                                  </select>
+                                  </Select>
                                 </div>
-                              </td>
-                              <td className="border px-3 py-2">
+                              </TD>
+                              <TD>
                                 <div className="flex items-center gap-2">
-                                  <input
+                                  <Input
                                     type="date"
                                     value={rowData.date || ''}
                                     onChange={(e) =>
@@ -495,10 +631,10 @@ export default function DrillForm() {
                                         e.target.value
                                       )
                                     }
-                                    className="w-full border border-gray-400 rounded px-2 py-1"
+                                    className="w-full"
                                   />
                                 </div>
-                                {rowData.errors?.map((err, i) => (
+                                {rowData.dateErrors?.map((err, i) => (
                                   <p
                                     key={i}
                                     className="text-red-600 text-xs mt-1"
@@ -514,9 +650,9 @@ export default function DrillForm() {
                                     {warn}
                                   </p>
                                 ))}
-                              </td>
-                              <td className="border px-3 py-2">
-                                <select
+                              </TD>
+                              <TD>
+                                <Select
                                   value={rowData.reason || ''}
                                   onChange={(e) =>
                                     handleChange(
@@ -527,8 +663,8 @@ export default function DrillForm() {
                                       e.target.value
                                     )
                                   }
-                                  disabled={indicator === 'Y'}
-                                  className="w-full border border-gray-400 rounded px-2 py-1"
+                  disabled={indicator === 'Y' || month === 'FIRSTDAY'}
+                                  className="w-full"
                                 >
                                   <option value="">-</option>
                                   <option value="01">01 - No Students</option>
@@ -536,12 +672,20 @@ export default function DrillForm() {
                                     02 - Not in Session
                                   </option>
                                   <option value="03">03 - Other</option>
-                                </select>
-                              </td>
-                              <td className="border px-3 py-2">
+                                </Select>
+                                {rowData.reasonErrors?.map((err, i) => (
+                                  <p
+                                    key={i}
+                                    className="text-red-600 text-xs mt-1"
+                                  >
+                                    {err}
+                                  </p>
+                                ))}
+                              </TD>
+                              <TD>
                                 <div className="flex items-center gap-2">
                                   <MessageSquare className="w-5 h-5 flex-shrink-0 text-gray-500" />
-                                  <input
+                                  <Input
                                     type="text"
                                     value={rowData.comment || ''}
                                     onChange={(e) =>
@@ -553,41 +697,58 @@ export default function DrillForm() {
                                         e.target.value
                                       )
                                     }
-                                    className="w-full border border-gray-400 rounded px-2 py-1"
+                                    className="w-full"
                                   />
                                 </div>
-                              </td>
-                              <td className="border px-3 py-2">
-                                {idx === drills.length - 1 &&
-                                  drills.length < maxAllowed && (
-                                    <button
+                                {rowData.commentErrors?.map((err, i) => (
+                                  <p
+                                    key={i}
+                                    className="text-red-600 text-xs mt-1"
+                                  >
+                                    {err}
+                                  </p>
+                                ))}
+                              </TD>
+                              <TD className="text-center">
+                                <div className="inline-flex items-center gap-2">
+                                  {idx === drills.length - 1 && canAddAny && (
+                                    <Button
+                                      variant="outline"
+                                      size="icon"
+                                      className="rounded-full text-green-700 border-green-200 hover:bg-green-50"
+                                      aria-label="Add drill row"
+                                      title="Add drill row"
+                                      onClick={() => addDrillRow(school.SCHOOL_NUMBER, month)}
+                                    >
+                                      <PlusCircle className="w-4 h-4" />
+                                    </Button>
+                                  )}
+                                  {idx > 0 && (
+                                    <Button
+                                      variant="outline"
+                                      size="icon"
+                                      className="rounded-full text-red-700 border-red-200 hover:bg-red-50"
+                                      aria-label="Remove this row"
+                                      title="Remove this row"
                                       onClick={() =>
-                                        addDrillRow(school.SCHOOL_NUMBER, month)
+                                        removeDrillRow(
+                                          school.SCHOOL_NUMBER,
+                                          month,
+                                          idx
+                                        )
                                       }
                                     >
-                                      <PlusCircle className="w-5 h-5 text-green-600" />
-                                    </button>
+                                      <Trash2 className="w-4 h-4" />
+                                    </Button>
                                   )}
-                                {idx > 0 && (
-                                  <button
-                                    onClick={() =>
-                                      removeDrillRow(
-                                        school.SCHOOL_NUMBER,
-                                        month,
-                                        idx
-                                      )
-                                    }
-                                  >
-                                    <Trash2 className="w-5 h-5 text-red-600" />
-                                  </button>
-                                )}
-                              </td>
-                            </tr>
+                                </div>
+                              </TD>
+                            </TR>
                           );
                         });
                       })}
-                    </tbody>
-                  </table>
+                    </TBody>
+                  </Table>
                 </div>
               </section>
             ))}
@@ -597,18 +758,14 @@ export default function DrillForm() {
         {/* Export */}
         {selectedAUN && schools.length > 0 && (
           <div className="bg-white border border-gray-300 rounded-lg shadow-sm p-6">
-            <button
+            <Button
               onClick={exportCSV}
               disabled={!isValid}
-              className={`px-8 py-3 text-lg font-medium text-white rounded ${
-                isValid
-                  ? 'bg-blue-600 hover:bg-blue-700'
-                  : 'bg-gray-400 cursor-not-allowed'
-              }`}
+              className={`px-8 py-3 text-lg ${!isValid ? 'bg-gray-400 cursor-not-allowed' : ''}`}
             >
               <Download className="inline-block mr-2" />
               Export CSV for PIMS
-            </button>
+            </Button>
             {!isValid && (
               <p className="text-red-600 text-sm mt-2">
                 Please fix all validation errors before exporting.

@@ -1,8 +1,8 @@
 export interface DistrictLocation {
-  SUBMITTING_AUN: string;
-  SUBMITTING_AUN_NAME: string;
+  AUN: string;
+  DISTRICT_NAME: string;
   SCHOOL_NUMBER: string;
-  SCHOOL_NAME: string;
+  LOCATION_NAME: string;
   ORG_TYPE: string;
 }
 
