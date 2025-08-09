@@ -122,27 +122,15 @@ export default function DrillForm() {
       if (!selectedYear || districtData) return;
       setDistrictsError(null);
       try {
-        const res = await fetch('/districts.json', { cache: 'no-store' });
-        if (res.ok) {
-          const json = (await res.json()) as DistrictLocation[];
-          if (Array.isArray(json) && json.length > 0) {
-            if (!cancelled) setDistrictData(json);
-            return;
-          }
-          // If file is empty, intentionally fall through to fallback import
-          throw new Error('Empty districts.json');
-        }
-        throw new Error(`Failed to fetch districts.json: ${res.status}`);
+  const res = await fetch('/DistrictLocation.json', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = (await res.json()) as DistrictLocation[];
+        if (!Array.isArray(json) || json.length === 0)
+          throw new Error('Empty DistrictLocation.json');
+        if (!cancelled) setDistrictData(json);
       } catch (err) {
-        // Fallback to dynamic import of TypeScript data (not bundled upfront)
-        try {
-          const mod: any = await import('../data/DistrictLocations');
-          const data: DistrictLocation[] = mod.default || mod.districtData || [];
-          if (!cancelled) setDistrictData(data);
-        } catch (e) {
-          if (!cancelled)
-            setDistrictsError('Unable to load district data. Please try again.');
-        }
+        if (!cancelled)
+          setDistrictsError('Unable to load district list from DistrictLocation.json.');
       }
     }
     loadDistricts();

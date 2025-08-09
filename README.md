@@ -122,8 +122,8 @@ The built files will be in the `dist` directory.
 src/
 ├── components/
 │   └── DrillForm.tsx      # Main application component
-├── data/
-│   └── DistrictLocations.ts # Pennsylvania school district data
+public/
+│   └── DistrictLocation.json # Pennsylvania district and school data source
 ├── App.tsx                # Root component
 ├── main.tsx              # Application entry point
 └── index.css             # Global styles
